@@ -10,6 +10,21 @@
 #include <mutex>         // std::mutex, std::unique_lock
 #include <cmath>
 
+#include <boost/beast/core.hpp>
+#include <boost/beast/websocket.hpp>
+#include <boost/asio/connect.hpp>
+#include <boost/asio/ip/tcp.hpp>
+#include <cstdlib>
+#include <iostream>
+#include <string>
+
+namespace beast = boost::beast;         // from <boost/beast.hpp>
+namespace http = beast::http;           // from <boost/beast/http.hpp>
+namespace websocket = beast::websocket; // from <boost/beast/websocket.hpp>
+namespace net = boost::asio;            // from <boost/asio.hpp>
+using tcp = boost::asio::ip::tcp;       // from <boost/asio/ip/tcp.hpp>
+
+bool use_ws = false;
 
 // It makes sense only for video-Camera (not for video-File)
 // To use - uncomment the following line. Optical-flow is supported only by OpenCV 3.x - 4.x
@@ -21,6 +36,11 @@
 
 
 #include "yolo_v2_class.hpp"    // imported functions from DLL
+
+//TMP
+//#define OPENCV
+//#define ZED_STEREO
+
 
 #ifdef OPENCV
 #ifdef ZED_STEREO
@@ -36,6 +56,8 @@
 #pragma comment(lib, "sl_input64.lib")
 #endif
 #pragma comment(lib, "sl_zed64.lib")
+
+
 
 float getMedian(std::vector<float> &v) {
     size_t n = v.size() / 2;
@@ -103,21 +125,21 @@ std::vector<bbox_t> get_3d_coordinates(std::vector<bbox_t> bbox_vect, cv::Mat xy
 cv::Mat slMat2cvMat(sl::Mat &input) {
     int cv_type = -1; // Mapping between MAT_TYPE and CV_TYPE
     if(input.getDataType() ==
-#ifdef ZED_STEREO_2_COMPAT_MODE
-        sl::MAT_TYPE_32F_C4
-#else
-        sl::MAT_TYPE::F32_C4
-#endif
-        ) {
+        #ifdef ZED_STEREO_2_COMPAT_MODE
+            sl::MAT_TYPE_32F_C4
+        #else
+            sl::MAT_TYPE::F32_C4
+        #endif
+            ) {
         cv_type = CV_32FC4;
     } else cv_type = CV_8UC4; // sl::Mat used are either RGBA images or XYZ (4C) point clouds
     return cv::Mat(input.getHeight(), input.getWidth(), cv_type, input.getPtr<sl::uchar1>(
-#ifdef ZED_STEREO_2_COMPAT_MODE
-        sl::MEM::MEM_CPU
-#else
-        sl::MEM::CPU
-#endif
-        ));
+                   #ifdef ZED_STEREO_2_COMPAT_MODE
+                       sl::MEM::MEM_CPU
+                   #else
+                       sl::MEM::CPU
+                   #endif
+                       ));
 }
 
 cv::Mat zed_capture_rgb(sl::Camera &zed) {
@@ -131,12 +153,12 @@ cv::Mat zed_capture_rgb(sl::Camera &zed) {
 cv::Mat zed_capture_3d(sl::Camera &zed) {
     sl::Mat cur_cloud;
     zed.retrieveMeasure(cur_cloud,
-#ifdef ZED_STEREO_2_COMPAT_MODE
-        sl::MEASURE_XYZ
-#else
-        sl::MEASURE::XYZ
-#endif
-        );
+                    #ifdef ZED_STEREO_2_COMPAT_MODE
+                        sl::MEASURE_XYZ
+                    #else
+                        sl::MEASURE::XYZ
+                    #endif
+                        );
     return slMat2cvMat(cur_cloud).clone();
 }
 
@@ -178,7 +200,7 @@ std::vector<bbox_t> get_3d_coordinates(std::vector<bbox_t> bbox_vect, cv::Mat xy
 
 
 void draw_boxes(cv::Mat mat_img, std::vector<bbox_t> result_vec, std::vector<std::string> obj_names,
-    int current_det_fps = -1, int current_cap_fps = -1)
+                int current_det_fps = -1, int current_cap_fps = -1)
 {
     int const colors[6][3] = { { 1,0,1 },{ 0,0,1 },{ 0,1,1 },{ 0,1,0 },{ 1,1,0 },{ 1,0,0 } };
 
@@ -203,8 +225,8 @@ void draw_boxes(cv::Mat mat_img, std::vector<bbox_t> result_vec, std::vector<std
             }
 
             cv::rectangle(mat_img, cv::Point2f(std::max((int)i.x - 1, 0), std::max((int)i.y - 35, 0)),
-                cv::Point2f(std::min((int)i.x + max_width, mat_img.cols - 1), std::min((int)i.y, mat_img.rows - 1)),
-                color, CV_FILLED, 8, 0);
+                          cv::Point2f(std::min((int)i.x + max_width, mat_img.cols - 1), std::min((int)i.y, mat_img.rows - 1)),
+                          color, CV_FILLED, 8, 0);
             putText(mat_img, obj_name, cv::Point2f(i.x, i.y - 16), cv::FONT_HERSHEY_COMPLEX_SMALL, 1.2, cv::Scalar(0, 0, 0), 2);
             if(!coords_3d.empty()) putText(mat_img, coords_3d, cv::Point2f(i.x, i.y-1), cv::FONT_HERSHEY_COMPLEX_SMALL, 0.8, cv::Scalar(0, 0, 0), 1);
         }
@@ -217,13 +239,52 @@ void draw_boxes(cv::Mat mat_img, std::vector<bbox_t> result_vec, std::vector<std
 #endif    // OPENCV
 
 
-void show_console_result(std::vector<bbox_t> const result_vec, std::vector<std::string> const obj_names, int frame_id = -1) {
-    if (frame_id >= 0) std::cout << " Frame: " << frame_id << std::endl;
+void show_console_result(std::vector<bbox_t> const result_vec, std::vector<std::string> const obj_names, websocket::stream<tcp::socket> &ws, int frame_id = -1) {
+    if (frame_id >= 0)
+    {
+        std::cout << " Frame: " << frame_id << std::endl;
+
+    }
     for (auto &i : result_vec) {
         if (obj_names.size() > i.obj_id) std::cout << obj_names[i.obj_id] << " - ";
-        std::cout << "obj_id = " << i.obj_id << ",  x = " << i.x << ", y = " << i.y
-            << ", w = " << i.w << ", h = " << i.h
-            << std::setprecision(3) << ", prob = " << i.prob << std::endl;
+        if (!std::isnan(i.z_3d)) {
+
+            if(use_ws)
+            {
+            ws.write(net::buffer(std::string(" Frame: " + std::to_string(frame_id) + ", type = " + obj_names[i.obj_id] + ", obj_id = " + std::to_string(i.obj_id) + ",  x = " + std::to_string(i.x_3d) + ", y = " + std::to_string(i.y_3d) + ", z = " + std::to_string(i.z_3d) + ", w = " + std::to_string(i.w) + ", h = " + std::to_string(i.h) + ", prob = " + std::to_string(i.prob))));
+
+            }
+            std::cout << "obj_id = " << i.obj_id << ",  x = " << i.x_3d << ", y = " << i.y_3d << ", z = " << i.z_3d
+                      << ", w = " << i.w << ", h = " << i.h
+                      << std::setprecision(3) << ", prob = " << i.prob << std::endl;
+        }
+        else
+        {
+            std::cout << "obj_id = " << i.obj_id << ",  x = " << i.x << ", y = " << i.y
+                      << ", w = " << i.w << ", h = " << i.h
+                      << std::setprecision(3) << ", prob = " << i.prob << std::endl;
+        }
+    }
+}
+
+void show_file_result(std::vector<bbox_t> const result_vec, std::vector<std::string> const obj_names, int frame_id, std::ofstream &myfile) {
+    if (frame_id >= 0) myfile << "Frame: " << frame_id << std::endl;
+    for (auto &i : result_vec) {
+        if(obj_names.size() > i.obj_id && obj_names[i.obj_id] == "person")
+        {
+            if (obj_names.size() > i.obj_id) myfile << obj_names[i.obj_id] << " - ";
+            if (!std::isnan(i.z_3d)) {
+                myfile << "obj_id = " << i.obj_id << ",  x = " << i.x_3d << ", y = " << i.y_3d << ", z = " << i.z_3d
+                       << ", w = " << i.w << ", h = " << i.h
+                       << std::setprecision(3) << ", prob = " << i.prob << std::endl;
+            }
+            else
+            {
+                myfile << "obj_id = " << i.obj_id << ",  x = " << i.x << ", y = " << i.y
+                       << ", w = " << i.w << ", h = " << i.h
+                       << std::setprecision(3) << ", prob = " << i.prob << std::endl;
+            }
+        }
     }
 }
 
@@ -282,14 +343,77 @@ int main(int argc, char *argv[])
         weights_file = argv[3];
         filename = argv[4];
     }
+
+
+
     else if (argc > 1) filename = argv[1];
 
     float const thresh = (argc > 5) ? std::stof(argv[5]) : 0.2;
 
+
+    std::string host = "localhost";
+    std::string  port = "1880";
+
+    std::ofstream outFile;
+    if(argc > 7)
+    {
+        use_ws = true;
+        host = argv[6];
+        port = argv[7];
+    }
+    else if(argc > 6)
+    {
+        outFile.open (argv[6]);
+    }
+
+    try
+    {
+        // The io_context is required for all I/O
+        net::io_context ioc;
+
+        // These objects perform our I/O
+        tcp::resolver resolver{ioc};
+        websocket::stream<tcp::socket> ws{ioc};
+
+        if(use_ws)
+        {
+        // Look up the domain name
+        auto const results = resolver.resolve(host, port);
+
+        // Make the connection on the IP address we get from a lookup
+        auto ep = net::connect(ws.next_layer(), results);
+
+        // Update the host_ string. This will provide the value of the
+        // Host HTTP header during the WebSocket handshake.
+        // See https://tools.ietf.org/html/rfc7230#section-5.4
+        host += ':' + std::to_string(ep.port());
+
+        // Set a decorator to change the User-Agent of the handshake
+        ws.set_option(websocket::stream_base::decorator(
+            [](websocket::request_type& req)
+            {
+                req.set(http::field::user_agent,
+                    std::string(BOOST_BEAST_VERSION_STRING) +
+                        " websocket-client-coro");
+            }));
+
+        // Perform the websocket handshake
+        ws.handshake(host, "/");
+
+        // Send the message
+        //ws.write(net::buffer(std::string(text)));
+        }
+
+
+
+
+
+    std::cout << names_file << " "  << cfg_file << " "  << weights_file << " "  << filename << " "  << thresh  << std::endl;
+
     Detector detector(cfg_file, weights_file);
 
     auto obj_names = objects_names_from_file(names_file);
-    std::string out_videofile = "result.avi";
+    std::string out_videofile = "/tmp/result.avi";
     bool const save_output_videofile = false;   // true - for history
     bool const send_network = false;        // true - for remote detection
     bool const use_kalman_filter = false;   // true - for stationary camera
@@ -305,6 +429,7 @@ int main(int argc, char *argv[])
     while (true)
     {
         std::cout << "input image or video filename: ";
+        std::cout << filename << std::endl;
         if(filename.size() == 0) std::cin >> filename;
         if (filename.size() == 0) break;
 
@@ -316,8 +441,8 @@ int main(int argc, char *argv[])
             std::string const file_ext = filename.substr(filename.find_last_of(".") + 1);
             std::string const protocol = filename.substr(0, 7);
             if (file_ext == "avi" || file_ext == "mp4" || file_ext == "mjpg" || file_ext == "mov" ||     // video file
-                protocol == "rtmp://" || protocol == "rtsp://" || protocol == "http://" || protocol == "https:/" ||    // video network stream
-                filename == "zed_camera" || file_ext == "svo" || filename == "web_camera")   // ZED stereo camera
+                    protocol == "rtmp://" || protocol == "rtsp://" || protocol == "http://" || protocol == "https:/" ||    // video network stream
+                    filename == "zed_camera" || file_ext == "svo" || filename == "web_camera")   // ZED stereo camera
 
             {
                 if (protocol == "rtsp://" || protocol == "http://" || protocol == "https:/" || filename == "zed_camera" || filename == "web_camera")
@@ -336,23 +461,23 @@ int main(int argc, char *argv[])
 #ifdef ZED_STEREO
                 sl::InitParameters init_params;
                 init_params.depth_minimum_distance = 0.5;
-    #ifdef ZED_STEREO_2_COMPAT_MODE
+#ifdef ZED_STEREO_2_COMPAT_MODE
                 init_params.depth_mode = sl::DEPTH_MODE_ULTRA;
                 init_params.camera_resolution = sl::RESOLUTION_HD720;// sl::RESOLUTION_HD1080, sl::RESOLUTION_HD720
                 init_params.coordinate_units = sl::UNIT_METER;
                 init_params.camera_buffer_count_linux = 2;
                 if (file_ext == "svo") init_params.svo_input_filename.set(filename.c_str());
-    #else
+#else
                 init_params.depth_mode = sl::DEPTH_MODE::ULTRA;
                 init_params.camera_resolution = sl::RESOLUTION::HD720;// sl::RESOLUTION::HD1080, sl::RESOLUTION::HD720
                 init_params.coordinate_units = sl::UNIT::METER;
                 if (file_ext == "svo") init_params.input.setFromSVOFile(filename.c_str());
-    #endif
+#endif
                 //init_params.sdk_cuda_ctx = (CUcontext)detector.get_cuda_context();
                 init_params.sdk_gpu_id = detector.cur_gpu_id;
 
                 if (filename == "zed_camera" || file_ext == "svo") {
-                    std::cout << "ZED 3D Camera " << zed.open(init_params) << std::endl;
+                    std::cout << "ZED 3D Camera TEST !!! " << zed.open(init_params) << std::endl;
                     if (!zed.isOpened()) {
                         std::cout << " Error: ZED Camera should be connected to USB 3.0. And ZED_SDK should be installed. \n";
                         getchar();
@@ -398,12 +523,12 @@ int main(int argc, char *argv[])
                     bool exit_flag;
                     cv::Mat zed_cloud;
                     std::queue<cv::Mat> track_optflow_queue;
-                    detection_data_t() : new_detection(false), exit_flag(false) {}
+                    detection_data_t() : exit_flag(false), new_detection(false) {}
                 };
 
                 const bool sync = detection_sync; // sync data exchange
                 send_one_replaceable_object_t<detection_data_t> cap2prepare(sync), cap2draw(sync),
-                    prepare2detect(sync), detect2draw(sync), draw2show(sync), draw2write(sync), draw2net(sync);
+                        prepare2detect(sync), detect2draw(sync), draw2show(sync), draw2write(sync), draw2net(sync);
 
                 std::thread t_cap, t_prepare, t_detect, t_post, t_draw, t_write, t_network;
 
@@ -418,12 +543,12 @@ int main(int argc, char *argv[])
 #ifdef ZED_STEREO
                         if (use_zed_camera) {
                             while (zed.grab() !=
-        #ifdef ZED_STEREO_2_COMPAT_MODE
-                                sl::SUCCESS
-        #else
-                                sl::ERROR_CODE::SUCCESS
-        #endif
-                                ) std::this_thread::sleep_for(std::chrono::milliseconds(2));
+       #ifdef ZED_STEREO_2_COMPAT_MODE
+                                   sl::SUCCESS
+       #else
+                                   sl::ERROR_CODE::SUCCESS
+       #endif
+                                   ) std::this_thread::sleep_for(std::chrono::milliseconds(2));
                             detection_data.cap_frame = zed_capture_rgb(zed);
                             detection_data.zed_cloud = zed_capture_3d(zed);
                         }
@@ -558,14 +683,24 @@ int main(int argc, char *argv[])
 
                         //small_preview.set(draw_frame, result_vec);
                         //large_preview.set(draw_frame, result_vec);
+
+
                         draw_boxes(draw_frame, result_vec, obj_names, current_fps_det, current_fps_cap);
-                        //show_console_result(result_vec, obj_names, detection_data.frame_id);
+                        show_console_result(result_vec, obj_names, ws, detection_data.frame_id);
+
+                        if(argc > 6)
+                        {
+                            show_file_result(result_vec, obj_names, detection_data.frame_id, outFile);
+                        }
                         //large_preview.draw(draw_frame);
                         //small_preview.draw(draw_frame, true);
 
-                        detection_data.result_vec = result_vec;
-                        detection_data.draw_frame = draw_frame;
-                        draw2show.send(detection_data);
+                        if(detection_data.frame_id % 10 == 0)
+                        {
+                            detection_data.result_vec = result_vec;
+                            detection_data.draw_frame = draw_frame;
+                            draw2show.send(detection_data);
+                        }
                         if (send_network) draw2net.send(detection_data);
                         if (output_video.isOpened()) draw2write.send(detection_data);
                     } while (!detection_data.exit_flag);
@@ -659,7 +794,7 @@ int main(int argc, char *argv[])
                         std::cout << line << std::endl;
                         cv::Mat mat_img = cv::imread(line);
                         std::vector<bbox_t> result_vec = detector.detect(mat_img);
-                        show_console_result(result_vec, obj_names);
+                        show_console_result(result_vec, obj_names, ws);
                         //draw_boxes(mat_img, result_vec, obj_names);
                         //cv::imwrite("res_" + line, mat_img);
                     }
@@ -679,7 +814,7 @@ int main(int argc, char *argv[])
                 //result_vec = detector.tracking_id(result_vec);    // comment it - if track_id is not required
                 draw_boxes(mat_img, result_vec, obj_names);
                 cv::imshow("window name", mat_img);
-                show_console_result(result_vec, obj_names);
+                show_console_result(result_vec, obj_names, ws);
                 cv::waitKey(0);
             }
 #else   // OPENCV
@@ -688,13 +823,35 @@ int main(int argc, char *argv[])
             auto img = detector.load_image(filename);
             std::vector<bbox_t> result_vec = detector.detect(img);
             detector.free_image(img);
-            show_console_result(result_vec, obj_names);
+            show_console_result(result_vec, obj_names, ws);
 #endif  // OPENCV
         }
         catch (std::exception &e) { std::cerr << "exception: " << e.what() << "\n"; getchar(); }
         catch (...) { std::cerr << "unknown exception \n"; getchar(); }
         filename.clear();
     }
+    if(argc > 6)
+    {
+        outFile.close();
+    }
+            // This buffer will hold the incoming message
+        beast::flat_buffer buffer;
 
+        // Read a message into our buffer
+        ws.read(buffer);
+
+        // Close the WebSocket connection
+        ws.close(websocket::close_code::normal);
+
+        // If we get here then the connection is closed gracefully
+
+        // The make_printable() function helps print a ConstBufferSequence
+        std::cout << beast::make_printable(buffer.data()) << std::endl;
+    }
+    catch(std::exception const& e)
+    {
+        std::cerr << "Error: " << e.what() << std::endl;
+        return EXIT_FAILURE;
+    }
     return 0;
 }
